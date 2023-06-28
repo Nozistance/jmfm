@@ -1,4 +1,4 @@
-use jmfm::id_count::{self, IdCount};
+use jmfm::id_counts::{self, IdCounts};
 use log::{error, info, warn, LevelFilter};
 
 use std::fs::{File, OpenOptions};
@@ -131,9 +131,9 @@ fn main() {
         total_count as f32 / pb.elapsed().as_secs_f32()
     );
 
-    let id_count = IdCount {
+    let id_counts = IdCounts {
         data_version: 3337,
-        data: id_count::Data {
+        data: id_counts::Data {
             map: (first_map_id + total_count) as i32,
         },
     };
@@ -142,7 +142,7 @@ fn main() {
         .write(true)
         .open(world.join("data").join("idcounts.dat"))
     {
-        nbt::to_gzip_writer(&mut file, &id_count, None).unwrap();
+        nbt::to_gzip_writer(&mut file, &id_counts, None).unwrap();
     }
 }
 
@@ -153,6 +153,6 @@ where
     let path = path.as_ref().join("data").join("idcounts.dat");
     let file = File::open(path)?;
 
-    let blob = nbt::from_gzip_reader::<File, IdCount>(file)?;
+    let blob = nbt::from_gzip_reader::<File, IdCounts>(file)?;
     Ok(blob.data.map as usize)
 }

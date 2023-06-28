@@ -2,7 +2,7 @@ use crate::palette::MapPalette;
 use image::{imageops::FilterType::Lanczos3, DynamicImage, GenericImage};
 
 pub mod map;
-pub mod id_count;
+pub mod id_counts;
 pub mod palette;
 
 pub trait DynamicImageMethods {
