@@ -1,19 +1,15 @@
-use jmfm::id_counts::{self, IdCounts};
-use log::{error, info, warn, LevelFilter};
-
-use std::fs::{File, OpenOptions};
-use std::io::Result;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process;
 
 use clap::{arg, value_parser, Parser};
-use image::DynamicImage;
 use indicatif::{ProgressBar, ProgressStyle};
-use jmfm::map::{Data, MapEntry};
+use log::{error, info, warn, LevelFilter};
 use rayon::prelude::*;
 
+use jmfm::id_counts::{self, IdCounts};
+use jmfm::map::{Data, MapEntry};
 use jmfm::palette::MapPalette;
-use jmfm::DynamicImageMethods;
+use jmfm::{read_nbt, write_nbt, DynamicImageMethods};
 
 use crate::config::Config;
 
@@ -25,17 +21,17 @@ mod config;
 #[command(about = "Blazingly fast conversion of images into Minecraft maps", long_about = None)]
 struct Args {
     /// By default, the width is chosen automatically
-    #[arg(long, short, num_args(0..=1), value_parser(value_parser!(u32).range(1..)))]
-    width: Option<u32>,
+    #[arg(long, short, num_args(0..=1), value_parser(value_parser!(i32).range(1..)))]
+    width: Option<i32>,
     /// By default, the height is chosen automatically
-    #[arg(long, short, num_args(0..=1), value_parser(value_parser!(u32).range(1..)))]
-    height: Option<u32>,
+    #[arg(long, short, num_args(0..=1), value_parser(value_parser!(i32).range(1..)))]
+    height: Option<i32>,
     #[arg(long("first-map-id"), short('i'), value_name = "FIRST-MAP-ID")]
     /// ID of the first map in the order
-    first_map_id: Option<usize>,
+    first_map_id: Option<i32>,
     /// Root directory of the target world
     #[arg(required = true)]
-    world: PathBuf,
+    output: PathBuf,
     /// Paths to image files
     #[arg(required = true)]
     images: Vec<PathBuf>,
@@ -53,106 +49,87 @@ fn main() {
     });
 
     let arguments = Args::parse();
-    let world = Path::new(&arguments.world);
-    let path_iter = arguments.images.into_par_iter();
-    let width = arguments.width.unwrap_or(1) as usize;
-    let height = arguments.height.unwrap_or(1) as usize;
-    let first_map_id = arguments.first_map_id.unwrap_or_else(|| {
-        last_map_id(world).unwrap_or_else(|err| {
-            warn!("Unable to read idcounts.dat - {}", err);
-            0
-        })
-    });
-
-    let output = if world.join("data").exists() {
-        world.join("data")
+    let output = arguments.output;
+    let output = if output.join("data").exists() {
+        output.join("data")
     } else {
-        world.to_path_buf()
+        warn!("{:?} - No such directory", output.join("data"));
+        output
     };
 
-    if !world.exists() {
-        error!("{:?} - No such directory", world);
-        process::exit(1);
-    }
+    let image_paths = arguments.images;
+    let width = arguments.width.unwrap_or(1);
+    let height = arguments.height.unwrap_or(1);
 
     info!("Reading image files");
-
-    let images = path_iter
-        .enumerate()
-        .map(|(i, path)| {
-            image::open(&path)
-                .map(|image| (i, image))
-                .unwrap_or_else(|err| {
-                    error!("{} - {}", path.to_str().unwrap(), err);
-                    process::exit(1);
-                })
-        })
-        .collect::<Vec<(usize, DynamicImage)>>();
-
-    let total_count = width * height * images.len();
-    let palette = MapPalette {
-        multipliers: config.multipliers.clone(),
-        colors: config.colors(),
-    };
-
-    info!("The first map id will be {}", first_map_id);
-    info!("{} image(s) -> {} map(s)", images.len(), total_count);
-
-    let pb = ProgressBar::new(total_count as u64);
+    let pb = ProgressBar::new(image_paths.len() as u64);
     pb.set_style(
         ProgressStyle::with_template("[{elapsed_precise}] [{wide_bar}] {pos}/{len}")
             .unwrap()
-            .progress_chars("#-"),
+            .progress_chars("##-"),
     );
 
-    images
-        .into_par_iter()
-        .map(|(i, image)| (i, image.into_map_sheet(width as u32, height as u32)))
+    let image_iter = image_paths.par_iter().enumerate().map(|(i, path)| {
+        let result = image::open(path)
+            .map(|image| (i, image))
+            .unwrap_or_else(|err| {
+                error!("{} - {}", path.to_str().unwrap(), err);
+                process::exit(1);
+            });
+        pb.inc(1);
+        result
+    });
+
+    pb.finish_and_clear();
+    let total_count = width * height * image_iter.len() as i32;
+    let id_counts = read_nbt::<IdCounts, &PathBuf>(&output).ok();
+    let id_counts = IdCounts {
+        data_version: id_counts
+            .as_ref()
+            .map(|d| d.data_version)
+            .unwrap_or_else(|| config.data_version()),
+        data: id_counts::Data {
+            map: arguments
+                .first_map_id
+                .map(|f| f + total_count)
+                .unwrap_or_else(|| {
+                    id_counts.map(|d| d.data.map).unwrap_or_else(|| {
+                        warn!("Unable to read 'idcounts.dat'");
+                        0
+                    })
+                }),
+        },
+    };
+
+    let first_map_id = id_counts.data.map;
+
+    let palette = MapPalette::new(&config.colors(), &config.multipliers());
+    info!("The first map id will be {}", first_map_id);
+    info!("{} image(s) -> {} map(s)", image_iter.len(), total_count);
+
+    image_iter
+        .map(|(i, image)| (i, image.into_map_sheet(width, height)))
         .flat_map(|(i, s)| s.into_par_iter().enumerate().map(move |(j, m)| (i, j, m)))
-        .map(|(i, j, s)| (first_map_id + i * width * height + j, s))
+        .map(|(i, j, s)| (first_map_id + i as i32 * width * height + j as i32, s))
         .map(|(idx, s)| (format!("map_{}.dat", idx), s.into_map_colors(&palette)))
         .map(|(name, colors)| (name, Data::from(colors)))
-        .map(|(name, data)| (name, MapEntry::new(3337, data)))
+        .map(|(name, data)| (name, MapEntry::new(config.data_version(), data)))
         .for_each(|(name, map)| {
-            let mut l = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(output.join(name))
-                .unwrap();
-            nbt::to_gzip_writer(&mut l, &map, None).unwrap();
-            pb.inc(1)
+            pb.inc(1);
+            write_nbt(output.join(&name), &map).unwrap_or_else(|e| {
+                error!("{} - {}", name, e);
+            });
         });
+
+    write_nbt(output.join("idcounts.dat"), &id_counts).unwrap_or_else(|e| {
+        error!("Unable to write 'idcounts.dat' - {}", e.to_string());
+    });
 
     pb.finish_and_clear();
 
     info!(
-        "AVG Speed: {:.1} maps/sec",
+        "Total: {:.1} secs | AVG Speed: {:.1} maps/sec",
+        pb.elapsed().as_secs_f32(),
         total_count as f32 / pb.elapsed().as_secs_f32()
     );
-
-    let id_counts = IdCounts {
-        data_version: 3337,
-        data: id_counts::Data {
-            map: (first_map_id + total_count) as i32,
-        },
-    };
-
-    if let Ok(mut file) = OpenOptions::new()
-        .write(true)
-        .open(world.join("data").join("idcounts.dat"))
-    {
-        nbt::to_gzip_writer(&mut file, &id_counts, None).unwrap();
-    }
-}
-
-fn last_map_id<P>(path: P) -> Result<usize>
-where
-    P: AsRef<Path>,
-{
-    let path = path.as_ref().join("data").join("idcounts.dat");
-    let file = File::open(path)?;
-
-    let blob = nbt::from_gzip_reader::<File, IdCounts>(file)?;
-    Ok(blob.data.map as usize)
 }

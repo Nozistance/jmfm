@@ -1,17 +1,11 @@
 [package]
 name = "jmfm"
-version = "0.1.1"
+version = "1.0.0"
 authors = ["Denys Patsera <nozistance@gmail.com>"]
 edition = "2021"
 description = "JMFM (Java minecraft:filled_map's) is a library and console utility designed to convert images into Minecraft map art"
 repository = "https://github.com/Nozistance/jmfm"
 license = "BSD-3-Clause"
-
-[[bin]]
-doc = false
-name = "jmfm"
-path = "src/main.rs"
-required-features = ["binary"]
 
 [dependencies]
 hematite-nbt = "0.5.2"
@@ -42,7 +36,7 @@ version = "0.17.5"
 
 [dependencies.toml]
 optional = true
-version = "0.7.5"
+version = "0.8.2"
 
 [features]
 binary = ["clap", "confy", "env_logger", "log", "indicatif", "toml"]

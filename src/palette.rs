@@ -1,55 +1,58 @@
 use image::imageops::ColorMap;
 use image::Rgb;
 
-/// This represents Java Minecraft map colors palette that can be used in image dithering
-/// # Usage
-/// ```
-/// image::imageops::dither(&mut image, palette);
-/// ```
+use crate::ColorDistance;
+
+/// This represents Java Minecraft map colors palette that can be used in [image dithering](image::imageops::dither)
 #[derive(Debug)]
 pub struct MapPalette {
-    pub multipliers: Vec<u8>,
-    pub colors: Vec<Rgb<u8>>,
+    margin: usize,
+    colors: Vec<Rgb<u8>>,
+}
+
+impl MapPalette {
+    pub fn new(colors: &[Rgb<u8>], multipliers: &[u8]) -> Self {
+        Self {
+            margin: multipliers.len(),
+            colors: colors
+                .iter()
+                .flat_map(|c| multipliers.iter().map(move |m| (c, m)))
+                .map(|(c, &m)| (c.0.map(|c| c as f32), m as f32))
+                .map(|(c, m)| c.map(|c| c * m / 255.0).map(|c| c as u8))
+                .map(Rgb::from)
+                .collect(),
+        }
+    }
 }
 
 impl ColorMap for MapPalette {
     type Color = Rgb<u8>;
 
-    #[inline(always)]
     fn index_of(&self, color: &Rgb<u8>) -> usize {
-        self.colors.iter().position(|r| r == color).unwrap() + self.multipliers.len()
+        self.colors.iter().position(|r| r == color).unwrap() + self.margin
     }
 
-    #[inline(always)]
-    fn map_color(&self, color: &mut Rgb<u8>) {
-        let mut least_distance = i32::max_value();
-        let original = color.0;
-        for candidate in self.colors.iter() {
-            let distance = color_distance(&original, &candidate.0);
-            if distance == 0 {
-                color.0 = candidate.0;
-                return;
-            }
-            if distance < least_distance {
-                least_distance = distance;
-                color.0 = candidate.0;
-            }
-        }
-    }
-
-    fn lookup(&self, index: usize) -> Option<Self::Color> {
+    fn lookup(&self, index: usize) -> Option<Rgb<u8>> {
         self.colors.get(index).copied()
     }
 
     fn has_lookup(&self) -> bool {
         true
     }
-}
 
-fn color_distance(a: &[u8], b: &[u8]) -> i32 {
-    let m = (a[0] as i32 + b[0] as i32) >> 1;
-    let r = a[0] as i32 - b[0] as i32;
-    let g = a[1] as i32 - b[1] as i32;
-    let b = a[2] as i32 - b[2] as i32;
-    (((512 + m) * r * r) >> 8) + 4 * g * g + (((767 - m) * b * b) >> 8)
+    fn map_color(&self, color: &mut Rgb<u8>) {
+        let mut least_diff = usize::MAX;
+        let original = *color;
+        for candidate in self.colors.iter() {
+            let diff = original.dist(candidate);
+            if diff == 0 {
+                color.0 = candidate.0;
+                return;
+            }
+            if diff < least_diff {
+                least_diff = diff;
+                color.0 = candidate.0;
+            }
+        }
+    }
 }

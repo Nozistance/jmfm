@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// This represents the `idcounts.dat` file
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -12,10 +12,4 @@ pub struct IdCounts {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Data {
     pub map: i32,
-}
-
-impl From<i32> for Data {
-    fn from(map: i32) -> Self {
-        Data { map }
-    }
 }
