@@ -1,57 +1,64 @@
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 
-use image::{DynamicImage, GenericImage, imageops::FilterType::Lanczos3, Rgb};
+use image::imageops::ColorMap;
+use image::{imageops::FilterType::Lanczos3, DynamicImage, GenericImage, ImageBuffer, Pixel};
 use serde::{de, ser};
 
-use crate::palette::MapPalette;
-
-pub mod id_counts;
-pub mod map;
 pub mod palette;
+pub mod structs;
 
+/// A trait for calculating distance between colors
 pub trait ColorDistance {
-    fn dist(&self, other: &Self) -> usize;
+    fn dist(&self, other: &Self) -> isize;
 }
 
-impl ColorDistance for Rgb<u8> {
-    fn dist(&self, other: &Self) -> usize {
-        let m = self.0[0] as isize + other.0[0] as isize;
-        let r = self.0[0] as isize - other.0[0] as isize;
-        let g = self.0[1] as isize - other.0[1] as isize;
-        let b = self.0[2] as isize - other.0[2] as isize;
-        ((((1024 + m) * r * r + (1534 - m) * b * b) >> 9) + 4 * g * g).unsigned_abs()
+impl ColorDistance for [u8] {
+    /// Calculates the distance between two colors
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - The first color
+    /// * `other` - The second color
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use jmfm::ColorDistance;
+    /// let color1: [u8; 3] = [255, 0, 0];
+    /// let color2: [u8; 3] = [0, 255, 0];
+    /// assert_eq!(color1.dist(&color2), 195075);
+    /// ```
+    fn dist(&self, other: &Self) -> isize {
+        let m = self[0] as isize + other[0] as isize;
+        let r = (self[0] as isize - other[0] as isize).pow(2);
+        let g = (self[1] as isize - other[1] as isize).pow(2);
+        let b = (self[2] as isize - other[2] as isize).pow(2);
+        (((512 + m) * r) / 256) + 4 * g + (((767 - m) * b) / 256)
     }
 }
 
-pub trait DynamicImageMethods {
-    /// allows you to cut the image into equal square parts of 128x128 size
-    fn into_map_sheet(self, width: i32, height: i32) -> Vec<DynamicImage>;
-    /// Quantize the image according to the specified [MapPalette](MapPalette)
-    fn into_map_colors(self, palette: &MapPalette) -> Vec<i8>;
+pub fn cut_into_maps(image: DynamicImage, width: u32, height: u32) -> Vec<DynamicImage> {
+    let (width, height) = (width * 128, height * 128);
+    let mut image = image.resize_exact(width, height, Lanczos3);
+    (0..height)
+        .step_by(128)
+        .flat_map(|y| (0..width).step_by(128).map(move |x| (x, y)))
+        .map(|(x, y)| image.sub_image(x, y, 128, 128).to_image())
+        .map(DynamicImage::from)
+        .collect()
 }
 
-impl DynamicImageMethods for DynamicImage {
-    fn into_map_sheet(self, width: i32, height: i32) -> Vec<DynamicImage> {
-        let (width, height) = (width * 128, height * 128);
-        let mut image = self.resize_exact(width as u32, height as u32, Lanczos3);
-        let i = (0..height)
-            .step_by(128)
-            .flat_map(|y| (0..width).step_by(128).map(move |x| (x, y)))
-            .map(|(x, y)| image.sub_image(x as u32, y as u32, 128, 128).to_image())
-            .map(DynamicImage::from)
-            .collect();
-        i
-    }
-
-    fn into_map_colors(self, palette: &MapPalette) -> Vec<i8> {
-        let mut target = self.to_rgb8();
-        image::imageops::dither(&mut target, palette);
-        image::imageops::index_colors(&target, palette)
-            .iter()
-            .map(|&b| b as i8)
-            .collect()
-    }
+pub fn index_colors<Pix, Map>(mut image: ImageBuffer<Pix, Vec<u8>>, palette: &Map) -> Vec<i8>
+where
+    Map: ColorMap<Color = Pix> + ?Sized,
+    Pix: Pixel<Subpixel = u8> + 'static,
+{
+    image::imageops::dither(&mut image, palette);
+    image::imageops::index_colors(&image, palette)
+        .iter()
+        .map(|&b| b as i8)
+        .collect()
 }
 
 pub fn read_nbt<T, P>(path: P) -> nbt::Result<T>

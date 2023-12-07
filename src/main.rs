@@ -1,15 +1,16 @@
+use std::error::Error;
+use std::fs;
 use std::path::PathBuf;
-use std::process;
 
 use clap::{arg, value_parser, Parser};
+use image::DynamicImage;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{error, info, warn, LevelFilter};
 use rayon::prelude::*;
 
-use jmfm::id_counts::{self, IdCounts};
-use jmfm::map::{Data, MapEntry};
 use jmfm::palette::MapPalette;
-use jmfm::{read_nbt, write_nbt, DynamicImageMethods};
+use jmfm::structs::{IdCounts, Map, MapData};
+use jmfm::{cut_into_maps, index_colors, read_nbt, write_nbt};
 
 use crate::config::Config;
 
@@ -21,11 +22,11 @@ mod config;
 #[command(about = "Blazingly fast conversion of images into Minecraft maps", long_about = None)]
 struct Args {
     /// By default, the width is chosen automatically
-    #[arg(long, short, num_args(0..=1), value_parser(value_parser!(i32).range(1..)))]
-    width: Option<i32>,
+    #[arg(long, short, num_args(0..=1), value_parser(value_parser!(u32).range(1..)))]
+    width: Option<u32>,
     /// By default, the height is chosen automatically
-    #[arg(long, short, num_args(0..=1), value_parser(value_parser!(i32).range(1..)))]
-    height: Option<i32>,
+    #[arg(long, short, num_args(0..=1), value_parser(value_parser!(u32).range(1..)))]
+    height: Option<u32>,
     #[arg(long("first-map-id"), short('i'), value_name = "FIRST-MAP-ID")]
     /// ID of the first map in the order
     first_map_id: Option<i32>,
@@ -37,24 +38,22 @@ struct Args {
     images: Vec<PathBuf>,
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     env_logger::builder()
         .filter(None, LevelFilter::Info)
         .format_timestamp(None)
         .init();
 
-    let config = confy::load::<Config>("jmfm", None).unwrap_or_else(|err| {
-        error!("Unable to load config: {}", err);
-        process::exit(1);
-    });
+    let config = confy::load::<Config>("jmfm", None)?;
 
     let arguments = Args::parse();
-    let output = arguments.output;
-    let output = if output.join("data").exists() {
-        output.join("data")
-    } else {
-        warn!("{:?} - No such directory", output.join("data"));
-        output
+    let output = arguments.output.join("data");
+    if !output.exists() {
+        warn!(
+            "{:?} - No such directory. It will be created automatically",
+            output
+        );
+        fs::create_dir(&output)?
     };
 
     let image_paths = arguments.images;
@@ -62,6 +61,48 @@ fn main() {
     let height = arguments.height.unwrap_or(1);
 
     info!("Reading image files");
+    let images: Vec<DynamicImage> = image_paths
+        .par_iter()
+        .map(|path| (path, image::open(path)))
+        .filter_map(|(p, i)| match i {
+            Ok(image) => Some(image),
+            Err(err) => {
+                error!("{p:?} - {err}");
+                None
+            }
+        })
+        .collect();
+
+    let total_count = width * height * images.len() as u32;
+
+    let id_counts = match read_nbt::<IdCounts, _>(&output) {
+        Ok(dat) => dat,
+        Err(err) => {
+            warn!("Unable to read 'idcounts.dat': {err}");
+            IdCounts::new(
+                config.data_version,
+                arguments.first_map_id.unwrap_or(0) + total_count as i32,
+            )
+        }
+    };
+
+    let data_version = id_counts.data_version;
+    let first_map_id = id_counts.data.map;
+
+    let palette = MapPalette::new(&config.colors, &config.multipliers);
+    info!("{} image(s) -> {} map(s)", images.len(), total_count);
+    info!("The first map id will be {first_map_id}");
+    info!("Processing...");
+    let maps: Vec<(String, Map)> = images
+        .into_par_iter()
+        .map(|image| cut_into_maps(image, width, height))
+        .flat_map(|sheet| sheet.into_par_iter().enumerate())
+        .map(|(idx, piece)| (first_map_id + idx as i32, piece.to_rgb8()))
+        .map(|(idx, piece)| (format!("map_{idx}.dat"), index_colors(piece, &palette)))
+        .map(|(name, colors)| (name, MapData::new(&colors)))
+        .map(|(name, data)| (name, Map::new(data_version, data)))
+        .collect();
+
     let pb = ProgressBar::new(image_paths.len() as u64);
     pb.set_style(
         ProgressStyle::with_template("[{elapsed_precise}] [{wide_bar}] {pos}/{len}")
@@ -69,60 +110,16 @@ fn main() {
             .progress_chars("##-"),
     );
 
-    let image_iter = image_paths.par_iter().enumerate().map(|(i, path)| {
-        let result = image::open(path)
-            .map(|image| (i, image))
-            .unwrap_or_else(|err| {
-                error!("{} - {}", path.to_str().unwrap(), err);
-                process::exit(1);
-            });
+    info!("Saving maps to {output:?}");
+    maps.par_iter().for_each(|(name, map)| {
         pb.inc(1);
-        result
+        write_nbt(output.join(name), map).unwrap_or_else(|err| {
+            error!("Unable to write {name}: {err}");
+        });
     });
 
-    pb.finish_and_clear();
-    let total_count = width * height * image_iter.len() as i32;
-    let id_counts = read_nbt::<IdCounts, &PathBuf>(&output).ok();
-    let id_counts = IdCounts {
-        data_version: id_counts
-            .as_ref()
-            .map(|d| d.data_version)
-            .unwrap_or_else(|| config.data_version()),
-        data: id_counts::Data {
-            map: arguments
-                .first_map_id
-                .map(|f| f + total_count)
-                .unwrap_or_else(|| {
-                    id_counts.map(|d| d.data.map).unwrap_or_else(|| {
-                        warn!("Unable to read 'idcounts.dat'");
-                        0
-                    })
-                }),
-        },
-    };
-
-    let first_map_id = id_counts.data.map;
-
-    let palette = MapPalette::new(&config.colors(), &config.multipliers());
-    info!("The first map id will be {}", first_map_id);
-    info!("{} image(s) -> {} map(s)", image_iter.len(), total_count);
-
-    image_iter
-        .map(|(i, image)| (i, image.into_map_sheet(width, height)))
-        .flat_map(|(i, s)| s.into_par_iter().enumerate().map(move |(j, m)| (i, j, m)))
-        .map(|(i, j, s)| (first_map_id + i as i32 * width * height + j as i32, s))
-        .map(|(idx, s)| (format!("map_{}.dat", idx), s.into_map_colors(&palette)))
-        .map(|(name, colors)| (name, Data::from(colors)))
-        .map(|(name, data)| (name, MapEntry::new(config.data_version(), data)))
-        .for_each(|(name, map)| {
-            pb.inc(1);
-            write_nbt(output.join(&name), &map).unwrap_or_else(|e| {
-                error!("{} - {}", name, e);
-            });
-        });
-
-    write_nbt(output.join("idcounts.dat"), &id_counts).unwrap_or_else(|e| {
-        error!("Unable to write 'idcounts.dat' - {}", e.to_string());
+    write_nbt(output.join("idcounts.dat"), &id_counts).unwrap_or_else(|err| {
+        error!("Unable to write \"idcounts.dat\": {err}");
     });
 
     pb.finish_and_clear();
@@ -132,4 +129,5 @@ fn main() {
         pb.elapsed().as_secs_f32(),
         total_count as f32 / pb.elapsed().as_secs_f32()
     );
+    Ok(())
 }

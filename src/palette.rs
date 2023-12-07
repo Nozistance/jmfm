@@ -1,5 +1,5 @@
 use image::imageops::ColorMap;
-use image::Rgb;
+use image::{Pixel, Rgb};
 
 use crate::ColorDistance;
 
@@ -7,20 +7,22 @@ use crate::ColorDistance;
 #[derive(Debug)]
 pub struct MapPalette {
     margin: usize,
-    colors: Vec<Rgb<u8>>,
+    colors: Vec<[u8; 3]>,
 }
 
+#[rustfmt::skip]
 impl MapPalette {
-    pub fn new(colors: &[Rgb<u8>], multipliers: &[u8]) -> Self {
+    pub fn new(colors: &[[u8; 3]], multipliers: &[u8]) -> Self {
         Self {
             margin: multipliers.len(),
-            colors: colors
-                .iter()
-                .flat_map(|c| multipliers.iter().map(move |m| (c, m)))
-                .map(|(c, &m)| (c.0.map(|c| c as f32), m as f32))
-                .map(|(c, m)| c.map(|c| c * m / 255.0).map(|c| c as u8))
-                .map(Rgb::from)
-                .collect(),
+            colors: colors.iter()
+                .flat_map(|c| multipliers.iter().map(move |&m| (c, m)))
+                .flat_map(|(c, m)| c.iter().map(move |&c| (c, m)))
+                .map(|(c, m)| (c as u16, m as u16))
+                .map(|(c, m)| (c * m) as f32 / 255.0)
+                .map(|r| r as u8).collect::<Vec<u8>>()
+                .chunks(3).map(|a| [a[0], a[1], a[2]])
+                .collect()
         }
     }
 }
@@ -29,30 +31,27 @@ impl ColorMap for MapPalette {
     type Color = Rgb<u8>;
 
     fn index_of(&self, color: &Rgb<u8>) -> usize {
-        self.colors.iter().position(|r| r == color).unwrap() + self.margin
+        self.colors
+            .iter()
+            .position(|r| r == color.channels())
+            .map(|p| p + self.margin)
+            .unwrap_or(0)
     }
 
-    fn lookup(&self, index: usize) -> Option<Rgb<u8>> {
-        self.colors.get(index).copied()
+    fn lookup(&self, idx: usize) -> Option<Self::Color> {
+        self.colors.get(idx).copied().map(|p| p.into())
     }
 
     fn has_lookup(&self) -> bool {
         true
     }
 
+    #[rustfmt::skip]
     fn map_color(&self, color: &mut Rgb<u8>) {
-        let mut least_diff = usize::MAX;
         let original = *color;
-        for candidate in self.colors.iter() {
-            let diff = original.dist(candidate);
-            if diff == 0 {
-                color.0 = candidate.0;
-                return;
-            }
-            if diff < least_diff {
-                least_diff = diff;
-                color.0 = candidate.0;
-            }
+        if let Some(closest_color) = self.colors.iter()
+            .min_by_key(|&c| original.channels().dist(c)) {
+            color.0 = *closest_color;
         }
     }
 }
