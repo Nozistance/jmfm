@@ -67,7 +67,7 @@ where
     P: AsRef<Path>,
 {
     let file = File::open(path)?;
-    nbt::from_gzip_reader::<File, T>(file)
+    nbt::from_gzip_reader(file)
 }
 
 pub fn write_nbt<T, P>(path: P, nbt: &T) -> nbt::Result<()>

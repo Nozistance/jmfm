@@ -2,10 +2,19 @@ use serde::{Deserialize, Serialize};
 
 /// Structure for representing `idcounts.dat` file
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
 pub struct IdCounts {
-    #[serde(rename = "DataVersion")]
-    pub data_version: i32,
     pub data: IdCountsData,
+    pub data_version: i32,
+}
+
+impl IdCounts {
+    pub fn new(data_version: i32, map: i32) -> Self {
+        IdCounts {
+            data_version,
+            data: IdCountsData { map },
+        }
+    }
 }
 
 /// Structure for the data within IdCounts
@@ -17,9 +26,16 @@ pub struct IdCountsData {
 /// Structure for representing a `map_*.dat` file
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Map {
+    #[serde(rename = "data")]
+    pub data: MapData,
     #[serde(rename = "DataVersion")]
     pub data_version: i32,
-    pub data: MapData,
+}
+
+impl Map {
+    pub fn new(data_version: i32, data: MapData) -> Self {
+        Map { data_version, data }
+    }
 }
 
 /// Structure for the data within a Map
@@ -33,8 +49,21 @@ pub struct MapData {
     pub locked: i8,
     pub x_center: i32,
     pub z_center: i32,
-    pub banners: Box<[Banner]>,
-    pub colors: Box<[i8]>,
+    pub banners: Vec<Banner>,
+    pub frames: Vec<Frame>,
+    #[serde(serialize_with = "nbt::i8_array")]
+    pub colors: Vec<i8>,
+}
+
+impl MapData {
+    pub fn from(colors: Vec<i8>) -> Self {
+        MapData {
+            dimension: String::from("minecraft:overworld"),
+            locked: 1,
+            colors,
+            ..Default::default()
+        }
+    }
 }
 
 /// Structure for representing a banner
@@ -62,33 +91,4 @@ pub struct Pos {
     pub x: i32,
     pub y: i32,
     pub z: i32,
-}
-
-impl IdCounts {
-    /// Creates a new IdCounts instance with the provided data version and map data
-    pub fn new(data_version: i32, map: i32) -> Self {
-        IdCounts {
-            data_version,
-            data: IdCountsData { map },
-        }
-    }
-}
-
-impl Map {
-    /// Creates a new Map instance with the provided data version and map data
-    pub fn new(data_version: i32, data: MapData) -> Self {
-        Map { data_version, data }
-    }
-}
-
-impl MapData {
-    /// Creates a new MapData instance with default values and the provided array of colors
-    pub fn new(value: &[i8]) -> Self {
-        MapData {
-            dimension: String::from("minecraft:overworld"),
-            locked: 1,
-            colors: value.into(),
-            ..Default::default()
-        }
-    }
 }

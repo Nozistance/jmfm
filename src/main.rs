@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use clap::{arg, value_parser, Parser};
-use image::DynamicImage;
+use image::{DynamicImage, RgbImage};
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{error, info, warn, LevelFilter};
 use rayon::prelude::*;
@@ -47,7 +47,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = confy::load::<Config>("jmfm", None)?;
 
     let arguments = Args::parse();
-    let output = arguments.output.join("data");
+    let output = arguments.output;
+    if !output.exists() {
+        error!("{output:?} - No such directory");
+        return Ok(());
+    }
+    let output = output.join("data");
     if !output.exists() {
         warn!(
             "{:?} - No such directory. It will be created automatically",
@@ -61,28 +66,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     let height = arguments.height.unwrap_or(1);
 
     info!("Reading image files");
-    let images: Vec<DynamicImage> = image_paths
-        .par_iter()
-        .map(|path| (path, image::open(path)))
-        .filter_map(|(p, i)| match i {
-            Ok(image) => Some(image),
-            Err(err) => {
-                error!("{p:?} - {err}");
-                None
-            }
-        })
-        .collect();
+    let images: Vec<DynamicImage> = run_with_pb(
+        |pb| {
+            image_paths
+                .par_iter()
+                .map(|path| (path, image::open(path)))
+                .filter_map(|(p, i)| match i {
+                    Ok(image) => Some(image),
+                    Err(err) => {
+                        error!("{p:?} - {err}");
+                        None
+                    }
+                })
+                .inspect(|_| pb.inc(1))
+                .collect()
+        },
+        image_paths.len() as u64,
+    );
 
     let total_count = width * height * images.len() as u32;
 
-    let id_counts = match read_nbt::<IdCounts, _>(&output) {
+    let mut id_counts = match read_nbt::<IdCounts, _>(&output.join("idcounts.dat")) {
         Ok(dat) => dat,
         Err(err) => {
-            warn!("Unable to read 'idcounts.dat': {err}");
-            IdCounts::new(
-                config.data_version,
-                arguments.first_map_id.unwrap_or(0) + total_count as i32,
-            )
+            warn!("Unable to read 'idcounts.dat': {err}. It will be created automatically");
+            IdCounts::new(config.data_version, arguments.first_map_id.unwrap_or(0))
         }
     };
 
@@ -92,42 +100,74 @@ fn main() -> Result<(), Box<dyn Error>> {
     let palette = MapPalette::new(&config.colors, &config.multipliers);
     info!("{} image(s) -> {} map(s)", images.len(), total_count);
     info!("The first map id will be {first_map_id}");
-    info!("Processing...");
-    let maps: Vec<(String, Map)> = images
-        .into_par_iter()
-        .map(|image| cut_into_maps(image, width, height))
-        .flat_map(|sheet| sheet.into_par_iter().enumerate())
-        .map(|(idx, piece)| (first_map_id + idx as i32, piece.to_rgb8()))
-        .map(|(idx, piece)| (format!("map_{idx}.dat"), index_colors(piece, &palette)))
-        .map(|(name, colors)| (name, MapData::new(&colors)))
-        .map(|(name, data)| (name, Map::new(data_version, data)))
-        .collect();
+    info!("Resizing and cutting images...");
+    let maps: Vec<RgbImage> = run_with_pb(
+        |pb| {
+            images
+                .into_par_iter()
+                .map(|image| cut_into_maps(image, width, height))
+                .flat_map(|sheet| sheet.into_par_iter())
+                .map(|piece| piece.to_rgb8())
+                .inspect(|_| pb.inc(1))
+                .collect()
+        },
+        total_count as u64,
+    );
 
-    let pb = ProgressBar::new(image_paths.len() as u64);
+    info!("Processing...");
+    let maps: Vec<(String, Map)> = run_with_pb(
+        |pb| {
+            maps.into_par_iter()
+                .enumerate()
+                .map(|(idx, piece)| (first_map_id + idx as i32, piece))
+                .map(|(idx, piece)| (format!("map_{idx}.dat"), index_colors(piece, &palette)))
+                .map(|(name, colors)| (name, MapData::from(colors)))
+                .map(|(name, data)| (name, Map::new(data_version, data)))
+                .inspect(|_| pb.inc(1))
+                .collect()
+        },
+        total_count as u64,
+    );
+
+    info!("Saving maps to {output:?}");
+    let elapsed = run_with_pb(
+        |pb| {
+            maps.par_iter()
+                .inspect(|_| pb.inc(1))
+                .for_each(|(name, map)| {
+                    write_nbt(output.join(name), map).unwrap_or_else(|err| {
+                        error!("Unable to write {name}: {err}");
+                    });
+                });
+            pb.elapsed()
+        },
+        maps.len() as u64,
+    );
+
+    id_counts.data.map += total_count as i32;
+    write_nbt(output.join("idcounts.dat"), &id_counts).unwrap_or_else(|err| {
+        error!("Unable to write \"idcounts.dat\": {err}");
+    });
+
+    info!(
+        "Total: {:.1} secs | AVG Speed: {:.1} maps/sec",
+        elapsed.as_secs_f32(),
+        total_count as f32 / elapsed.as_secs_f32()
+    );
+    Ok(())
+}
+
+fn run_with_pb<B, F>(f: F, f_len: u64) -> B
+where
+    F: FnOnce(&ProgressBar) -> B,
+{
+    let pb = ProgressBar::new(f_len);
     pb.set_style(
         ProgressStyle::with_template("[{elapsed_precise}] [{wide_bar}] {pos}/{len}")
             .unwrap()
             .progress_chars("##-"),
     );
-
-    info!("Saving maps to {output:?}");
-    maps.par_iter().for_each(|(name, map)| {
-        pb.inc(1);
-        write_nbt(output.join(name), map).unwrap_or_else(|err| {
-            error!("Unable to write {name}: {err}");
-        });
-    });
-
-    write_nbt(output.join("idcounts.dat"), &id_counts).unwrap_or_else(|err| {
-        error!("Unable to write \"idcounts.dat\": {err}");
-    });
-
+    let r = f(&pb);
     pb.finish_and_clear();
-
-    info!(
-        "Total: {:.1} secs | AVG Speed: {:.1} maps/sec",
-        pb.elapsed().as_secs_f32(),
-        total_count as f32 / pb.elapsed().as_secs_f32()
-    );
-    Ok(())
+    r
 }

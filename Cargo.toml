@@ -1,6 +1,6 @@
 [package]
 name = "jmfm"
-version = "1.1.0"
+version = "2.0.0"
 authors = ["Denys Patsera <nozistance@gmail.com>"]
 edition = "2021"
 description = "JMFM (Java minecraft:filled_map's) is a library and console utility designed to convert images into Minecraft map art"
@@ -21,8 +21,13 @@ toml = { version = "0.8.2", optional = true }
 
 [features]
 binary = ["clap", "confy", "env_logger", "log", "indicatif", "toml"]
-default = []
+default = ["binary"]
 
 [lib]
 name = "jmfm"
 path = "src/lib.rs"
+
+[[bin]]
+name = "jmfm"
+path = "src/main.rs"
+required-features = ["binary"]
