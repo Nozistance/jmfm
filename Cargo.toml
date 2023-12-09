@@ -21,8 +21,13 @@ toml = { version = "0.8.2", optional = true }
 
 [features]
 binary = ["clap", "confy", "env_logger", "log", "indicatif", "toml"]
-default = []
+default = ["binary"]
 
 [lib]
 name = "jmfm"
 path = "src/lib.rs"
+
+[[bin]]
+name = "jmfm"
+path = "src/main.rs"
+required-features = ["binary"]
